@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Uçan Kuş</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #1b2b34;
+    overflow: hidden;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    touch-action: manipulation;
+  }
+  #wrap {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    border-radius: 10px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.55);
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+(() => {
+"use strict";
+
+// ---------------------------------------------------------------- kurulum
+const BASE_W = 480, BASE_H = 720;
+const GROUND_Y = BASE_H - 96;          // zeminin ust kenari
+const cv  = document.getElementById("c");
+const ctx = cv.getContext("2d");
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width  = BASE_W * dpr;
+  cv.height = BASE_H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const s = Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H) * 0.98;
+  cv.style.width  = (BASE_W * s) + "px";
+  cv.style.height = (BASE_H * s) + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---------------------------------------------------------------- ses
+let actx = null, muted = false;
+try { muted = localStorage.getItem("ucankus_mute") === "1"; } catch (e) {}
+
+function audio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  return actx;
+}
+function beep(f0, f1, dur, type, vol) {
+  if (muted) return;
+  const a = audio(); if (!a) return;
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, a.currentTime);
+  o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), a.currentTime + dur);
+  g.gain.setValueAtTime(vol, a.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(); o.stop(a.currentTime + dur + 0.02);
+}
+const sfxFlap  = () => beep(520, 300, 0.10, "square",   0.06);
+const sfxScore = () => beep(880, 1320, 0.12, "triangle", 0.09);
+const sfxHit   = () => beep(220,  60, 0.28, "sawtooth", 0.11);
+const sfxFall  = () => beep(160,  40, 0.45, "sine",     0.08);
+
+// ---------------------------------------------------------------- durum
+const READY = 0, PLAY = 1, DYING = 2, OVER = 3;
+let state = READY;
+
+const GRAVITY   = 0.46;
+const FLAP_V    = -8.1;
+const PIPE_W    = 70;
+const PIPE_DIST = 280;   // ardisik borular arasi mesafe (px)
+
+let bird, pipes, score, best, ticks, spawnAt, shake, flash, feathers, overAt;
+
+try { best = parseInt(localStorage.getItem("ucankus_best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+function speedFor(s)  { return Math.min(4.4, 2.6 + s * 0.035); }
+function gapFor(s)    { return Math.max(132, 178 - s * 2.2); }
+
+function reset() {
+  bird = { x: 120, y: BASE_H * 0.42, v: 0, rot: 0, wing: 0 };
+  pipes = [];
+  score = 0; ticks = 0; spawnAt = 0;
+  shake = 0; flash = 0; feathers = [];
+  state = READY;
+}
+
+function start() {
+  state = PLAY;
+  spawnAt = ticks + 24;
+  flap();
+}
+
+function flap() {
+  bird.v = FLAP_V;
+  bird.wing = 0;
+  sfxFlap();
+}
+
+function die() {
+  state = DYING;
+  bird.v = Math.min(bird.v, -3.4);
+  shake = 14; flash = 0.85;
+  sfxHit();
+  for (let i = 0; i < 16; i++) {
+    feathers.push({
+      x: bird.x, y: bird.y,
+      vx: (Math.random() - 0.5) * 7,
+      vy: -Math.random() * 5 - 1,
+      r: Math.random() * Math.PI * 2,
+      vr: (Math.random() - 0.5) * 0.4,
+      s: 3 + Math.random() * 4,
+      life: 60 + Math.random() * 30
+    });
+  }
+}
+
+function gameOver() {
+  state = OVER;
+  overAt = ticks;
+  sfxFall();
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem("ucankus_best", String(best)); } catch (e) {}
+  }
+}
+
+// ---------------------------------------------------------------- girdi
+function press() {
+  audio();
+  if (state === READY)      start();
+  else if (state === PLAY)  flap();
+  else if (state === OVER && ticks - overAt > 30) reset();
+}
+
+const MUTE_BTN = { x: BASE_W - 46, y: 18, w: 30, h: 28 };
+
+function toCanvas(e) {
+  const r = cv.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) / r.width  * BASE_W,
+    y: (e.clientY - r.top)  / r.height * BASE_H
+  };
+}
+
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  const p = toCanvas(e);
+  if (p.x > MUTE_BTN.x - 8 && p.x < MUTE_BTN.x + MUTE_BTN.w + 8 &&
+      p.y > MUTE_BTN.y - 8 && p.y < MUTE_BTN.y + MUTE_BTN.h + 8) {
+    muted = !muted;
+    try { localStorage.setItem("ucankus_mute", muted ? "1" : "0"); } catch (er) {}
+    return;
+  }
+  press();
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+    e.preventDefault();
+    if (!e.repeat) press();
+  } else if (e.code === "KeyR") {
+    if (state === OVER || state === PLAY || state === DYING) reset();
+  } else if (e.code === "KeyM") {
+    muted = !muted;
+    try { localStorage.setItem("ucankus_mute", muted ? "1" : "0"); } catch (er) {}
+  }
+});
+
+// ---------------------------------------------------------------- guncelle
+function circleHitsRect(cx, cy, r, rx, ry, rw, rh) {
+  const nx = Math.max(rx, Math.min(cx, rx + rw));
+  const ny = Math.max(ry, Math.min(cy, ry + rh));
+  const dx = cx - nx, dy = cy - ny;
+  return dx * dx + dy * dy < r * r;
+}
+
+function update() {
+  ticks++;
+  if (shake > 0) shake *= 0.86;
+  if (flash > 0) flash -= 0.06;
+
+  if (state === READY) {
+    bird.y = BASE_H * 0.42 + Math.sin(ticks / 16) * 9;
+    bird.rot = Math.sin(ticks / 16) * 0.12;
+    bird.wing = (bird.wing + 0.22) % 3;
+    return;
+  }
+
+  // kus fizigi
+  bird.v = Math.min(bird.v + GRAVITY, 13);
+  bird.y += bird.v;
+  bird.wing = state === PLAY ? (bird.wing + (bird.v < 0 ? 0.42 : 0.14)) % 3 : 0;
+  const target = bird.v < 0 ? -0.42 : Math.min(1.55, bird.v * 0.10);
+  bird.rot += (target - bird.rot) * 0.18;
+
+  // tuyler
+  for (const f of feathers) {
+    f.vy += 0.22; f.x += f.vx; f.y += f.vy; f.r += f.vr; f.life--;
+  }
+  feathers = feathers.filter(f => f.life > 0 && f.y < BASE_H);
+
+  if (state === DYING) {
+    if (bird.y + 12 >= GROUND_Y) {
+      bird.y = GROUND_Y - 12;
+      bird.rot = 1.55;
+      gameOver();
+    }
+    return;
+  }
+
+  if (state === OVER) return;
+
+  // ---- PLAY
+  const spd = speedFor(score);
+
+  if (ticks >= spawnAt) {
+    const gap = gapFor(score);
+    const margin = 70;
+    const gy = margin + gap / 2 + Math.random() * (GROUND_Y - gap - margin * 2);
+    pipes.push({ x: BASE_W + 20, gy, gap, scored: false });
+    spawnAt = ticks + Math.round(PIPE_DIST / spd);
+  }
+
+  for (const p of pipes) {
+    p.x -= spd;
+    if (!p.scored && p.x + PIPE_W < bird.x) {
+      p.scored = true;
+      score++;
+      sfxScore();
+    }
+  }
+  pipes = pipes.filter(p => p.x + PIPE_W > -10);
+
+  // carpisma
+  if (bird.y + 12 >= GROUND_Y) {
+    bird.y = GROUND_Y - 12;
+    die();
+    gameOver();
+    return;
+  }
+  if (bird.y < 10) { bird.y = 10; bird.v = Math.max(bird.v, -1); }   // tavan: olmez ama yukari kacamaz
+
+  for (const p of pipes) {
+    const topH = p.gy - p.gap / 2;
+    const botY = p.gy + p.gap / 2;
+    if (circleHitsRect(bird.x, bird.y, 12, p.x, -100, PIPE_W, topH + 100) ||
+        circleHitsRect(bird.x, bird.y, 12, p.x, botY, PIPE_W, GROUND_Y - botY)) {
+      die();
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- cizim
+const clouds = Array.from({ length: 6 }, (_, i) => ({
+  x: Math.random() * BASE_W, y: 60 + Math.random() * 180,
+  s: 0.6 + Math.random() * 0.8, sp: 0.18 + Math.random() * 0.22
+}));
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
+}
+
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  g.addColorStop(0, "#4ec0ca");
+  g.addColorStop(0.65, "#7fd6d8");
+  g.addColorStop(1, "#bfe9c8");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, BASE_W, GROUND_Y);
+
+  // gunes
+  ctx.fillStyle = "rgba(255,246,200,.85)";
+  ctx.beginPath(); ctx.arc(390, 96, 40, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.beginPath(); ctx.arc(390, 96, 60, 0, Math.PI * 2); ctx.fill();
+
+  // bulutlar
+  ctx.fillStyle = "rgba(255,255,255,.78)";
+  for (const c of clouds) {
+    if (state === PLAY || state === DYING) c.x -= c.sp;
+    if (c.x < -90 * c.s) { c.x = BASE_W + 60; c.y = 60 + Math.random() * 180; }
+    const s = c.s;
+    ctx.beginPath();
+    ctx.arc(c.x,          c.y,          20 * s, 0, Math.PI * 2);
+    ctx.arc(c.x + 22 * s, c.y - 10 * s, 26 * s, 0, Math.PI * 2);
+    ctx.arc(c.x + 48 * s, c.y,          19 * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // arka plan tepeleri
+  const off = (ticks * 0.35) % 160;
+  ctx.fillStyle = "#5aa86a";
+  ctx.beginPath();
+  ctx.moveTo(-160, GROUND_Y);
+  for (let x = -160; x <= BASE_W + 160; x += 160) {
+    ctx.quadraticCurveTo(x + 40 - off, GROUND_Y - 74, x + 80 - off, GROUND_Y - 6);
+    ctx.quadraticCurveTo(x + 120 - off, GROUND_Y - 52, x + 160 - off, GROUND_Y - 4);
+  }
+  ctx.lineTo(BASE_W + 160, GROUND_Y);
+  ctx.closePath();
+  ctx.fill();
+
+  // calilar
+  ctx.fillStyle = "#3f8c50";
+  const off2 = (ticks * 0.8) % 60;
+  for (let x = -60; x <= BASE_W + 60; x += 60) {
+    ctx.beginPath();
+    ctx.arc(x - off2 + 30, GROUND_Y + 2, 22, Math.PI, 0);
+    ctx.fill();
+  }
+}
+
+function drawGround() {
+  ctx.fillStyle = "#3c7f3c";
+  ctx.fillRect(0, GROUND_Y, BASE_W, 12);
+  ctx.fillStyle = "#ded895";
+  ctx.fillRect(0, GROUND_Y + 12, BASE_W, BASE_H - GROUND_Y - 12);
+
+  ctx.fillStyle = "#d3cc84";
+  const off = (ticks * speedFor(score)) % 48;
+  for (let x = -48; x < BASE_W + 48; x += 48) {
+    ctx.beginPath();
+    ctx.moveTo(x - off,      GROUND_Y + 12);
+    ctx.lineTo(x - off + 24, GROUND_Y + 12);
+    ctx.lineTo(x - off + 10, BASE_H);
+    ctx.lineTo(x - off - 14, BASE_H);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.fillStyle = "rgba(0,0,0,.10)";
+  ctx.fillRect(0, GROUND_Y + 12, BASE_W, 5);
+}
+
+function drawPipe(p) {
+  const topH = p.gy - p.gap / 2;
+  const botY = p.gy + p.gap / 2;
+  const g = ctx.createLinearGradient(p.x, 0, p.x + PIPE_W, 0);
+  g.addColorStop(0,    "#4f9c2b");
+  g.addColorStop(0.28, "#8ed64a");
+  g.addColorStop(0.62, "#5fb033");
+  g.addColorStop(1,    "#356b1c");
+
+  const cap = (y) => {
+    ctx.fillStyle = g;
+    roundRect(p.x - 5, y, PIPE_W + 10, 28, 5); ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,.28)"; ctx.lineWidth = 2;
+    roundRect(p.x - 5, y, PIPE_W + 10, 28, 5); ctx.stroke();
+  };
+
+  ctx.fillStyle = g;
+  ctx.fillRect(p.x, 0, PIPE_W, topH - 26);
+  ctx.fillRect(p.x, botY + 26, PIPE_W, GROUND_Y - botY - 26);
+  ctx.strokeStyle = "rgba(0,0,0,.28)"; ctx.lineWidth = 2;
+  ctx.strokeRect(p.x + 1, -2, PIPE_W - 2, topH - 24);
+  ctx.strokeRect(p.x + 1, botY + 26, PIPE_W - 2, GROUND_Y - botY - 24);
+
+  cap(topH - 28);
+  cap(botY);
+}
+
+function drawBird(x, y, rot, wing) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+
+  // govde
+  ctx.fillStyle = "#f7d746";
+  ctx.beginPath(); ctx.ellipse(0, 0, 17, 13, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#f0b429";
+  ctx.beginPath(); ctx.ellipse(-2, 5, 14, 8, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(90,60,0,.45)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(0, 0, 17, 13, 0, 0, Math.PI * 2); ctx.stroke();
+
+  // kanat
+  const wp = Math.floor(wing) % 3;              // 0 orta, 1 yukari, 2 asagi
+  const wy = wp === 1 ? -7 : (wp === 2 ? 6 : 0);
+  ctx.fillStyle = "#fffdf0";
+  ctx.beginPath(); ctx.ellipse(-3, wy + 1, 10, 6.5, wy * 0.05, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(90,60,0,.35)"; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.ellipse(-3, wy + 1, 10, 6.5, wy * 0.05, 0, Math.PI * 2); ctx.stroke();
+
+  // goz
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(8, -4, 5.5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(90,60,0,.45)"; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(8, -4, 5.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(9.6, -4, 2.4, 0, Math.PI * 2); ctx.fill();
+
+  // gaga
+  ctx.fillStyle = "#f2811d";
+  ctx.beginPath();
+  ctx.moveTo(14, -1); ctx.lineTo(26, 1.5); ctx.lineTo(14, 6);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "rgba(120,60,0,.45)";
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawFeathers() {
+  ctx.fillStyle = "#fdf3b0";
+  for (const f of feathers) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, f.life / 40);
+    ctx.translate(f.x, f.y); ctx.rotate(f.r);
+    ctx.beginPath(); ctx.ellipse(0, 0, f.s, f.s * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function bigText(txt, x, y, size, fill) {
+  ctx.font = "700 " + size + "px 'Segoe UI', system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(4, size / 8);
+  ctx.strokeStyle = "rgba(0,0,0,.55)";
+  ctx.lineJoin = "round";
+  ctx.strokeText(txt, x, y);
+  ctx.fillStyle = fill || "#fff";
+  ctx.fillText(txt, x, y);
+}
+
+function drawMuteButton() {
+  const b = MUTE_BTN;
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.moveTo(b.x + 2,  b.y + 10);
+  ctx.lineTo(b.x + 9,  b.y + 10);
+  ctx.lineTo(b.x + 17, b.y + 3);
+  ctx.lineTo(b.x + 17, b.y + 25);
+  ctx.lineTo(b.x + 9,  b.y + 18);
+  ctx.lineTo(b.x + 2,  b.y + 18);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.2; ctx.lineCap = "round";
+  if (muted) {
+    ctx.strokeStyle = "#ff5a5a";
+    ctx.beginPath();
+    ctx.moveTo(b.x + 21, b.y + 8);  ctx.lineTo(b.x + 30, b.y + 20);
+    ctx.moveTo(b.x + 30, b.y + 8);  ctx.lineTo(b.x + 21, b.y + 20);
+    ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(b.x + 18, b.y + 14, 6,  -0.9, 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(b.x + 18, b.y + 14, 11, -0.9, 0.9); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function panel(x, y, w, h) {
+  ctx.fillStyle = "rgba(20,32,40,.80)";
+  roundRect(x, y, w, h, 16); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = 2;
+  roundRect(x, y, w, h, 16); ctx.stroke();
+}
+
+function medalFor(s) {
+  if (s >= 40) return { c1: "#b9f2ff", c2: "#6fd7ef", t: "PLATİN" };
+  if (s >= 25) return { c1: "#ffe37a", c2: "#e0a92b", t: "ALTIN"  };
+  if (s >= 12) return { c1: "#e6e9ee", c2: "#a3adba", t: "GÜMÜŞ"  };
+  if (s >= 5)  return { c1: "#f0b98a", c2: "#b4713c", t: "BRONZ"  };
+  return null;
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0.4) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+
+  drawSky();
+  for (const p of pipes) drawPipe(p);
+  drawGround();
+  drawFeathers();
+  drawBird(bird.x, bird.y, bird.rot, bird.wing);
+
+  ctx.restore();
+
+  if (flash > 0) {
+    ctx.fillStyle = "rgba(255,255,255," + Math.max(0, flash) + ")";
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+  }
+
+  // skor
+  if (state === PLAY || state === DYING) {
+    bigText(String(score), BASE_W / 2, 92, 62);
+  }
+
+  drawMuteButton();
+
+  if (state === READY) {
+    bigText("UÇAN KUŞ", BASE_W / 2, 190, 52, "#fff08a");
+    bigText("Rekor: " + best, BASE_W / 2, 244, 24);
+
+    const pulse = 0.5 + Math.sin(ticks / 14) * 0.5;
+    ctx.globalAlpha = 0.55 + pulse * 0.45;
+    bigText("BOŞLUK  ·  TIKLA", BASE_W / 2, BASE_H - 190, 30);
+    ctx.globalAlpha = 1;
+    bigText("kanat çırpmak için", BASE_W / 2, BASE_H - 152, 19);
+  }
+
+  if (state === OVER) {
+    const w = 300, h = 250, x = (BASE_W - w) / 2, y = 168;
+    panel(x, y, w, h);
+    bigText("OYUN BİTTİ", BASE_W / 2, y + 44, 34, "#ff9a6b");
+
+    const m = medalFor(score);
+    if (m) {
+      const mx = x + 62, my = y + 128;
+      const g = ctx.createRadialGradient(mx - 6, my - 8, 3, mx, my, 30);
+      g.addColorStop(0, m.c1); g.addColorStop(1, m.c2);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(mx, my, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(mx, my, 30, 0, Math.PI * 2); ctx.stroke();
+      ctx.font = "700 11px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "rgba(0,0,0,.55)";
+      ctx.fillText(m.t, mx, my + 1);
+    }
+
+    const tx = m ? x + 196 : BASE_W / 2;
+    ctx.textAlign = "center";
+    bigText("SKOR", tx, y + 100, 18, "#cfe3ee");
+    bigText(String(score), tx, y + 132, 42);
+    bigText("REKOR", tx, y + 168, 18, "#cfe3ee");
+    bigText(String(best), tx, y + 196, 30, score >= best && score > 0 ? "#ffe066" : "#fff");
+
+    if (ticks - overAt > 30) {
+      const pulse = 0.5 + Math.sin(ticks / 12) * 0.5;
+      ctx.globalAlpha = 0.55 + pulse * 0.45;
+      bigText("BOŞLUK / R  →  tekrar oyna", BASE_W / 2, y + h + 52, 22);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- dongu
+const STEP = 1000 / 60;
+let last = performance.now(), acc = 0;
+
+function frame(t) {
+  acc += Math.min(t - last, 250);
+  last = t;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw();
+  requestAnimationFrame(frame);
+}
+
+reset();
+requestAnimationFrame(frame);
+try { window.focus(); } catch (e) {}   // klavye girdisi icin odak
+})();
+</script>
+</body>
+</html>
